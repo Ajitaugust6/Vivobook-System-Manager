@@ -1,167 +1,125 @@
 import customtkinter as ctk
 import threading
 import time
-from monitor import SystemMonitor, PowerController, MemoryOptimizer, NetworkMonitor
+import sys
+from monitor import SystemMonitor, PowerController, MemoryOptimizer, NetworkRadar
 
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("dark-blue")
-
-class DashboardApp(ctk.CTk):
+class LatencyAssassin(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        # Window Setup
-        self.title("Latency Assassin v3.0 (Threaded)")
-        self.geometry("500x600")
-        self.resizable(False, False)
+        # --- DYNAMIC WINDOW CONFIG ---
+        self.target_alpha = 0.2
+        self.current_alpha = 0.2
+        self.geometry("640x480")
+        self.attributes("-alpha", self.current_alpha)
+        self.attributes("-topmost", True)
+        self.overrideredirect(True) # Curvy rounded edge mode
 
-        # Initialize Backend Tools
-        self.monitor = SystemMonitor()
-        self.power = PowerController()
-        self.optimizer = MemoryOptimizer()
-        self.net_monitor = NetworkMonitor()
+        # Logic
+        self.monitor = SystemMonitor(); self.power = PowerController()
+        self.opt = MemoryOptimizer(); self.radar = NetworkRadar()
+        self.ping = 0; self.jitter = 0; self.running = True
 
-        # Shared Variables for Threading
-        self.current_ping = 0
-        self.ping_status_color = "gray"
-        self.running = True # To stop threads when app closes
+        # Drag Functionality
+        self.bind("<Button-1>", self.start_move)
+        self.bind("<B1-Motion>", self.do_move)
 
-        # --- UI LAYOUT ---
+        # --- UI: MAIN ROUNDED FRAME ---
+        self.glass_panel = ctk.CTkFrame(self, corner_radius=35, fg_color="#080B12", border_width=2, border_color="#1F2937")
+        self.glass_panel.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # SIDEBAR
+        self.sidebar = ctk.CTkFrame(self.glass_panel, width=180, corner_radius=35, fg_color="#0D1117")
+        self.sidebar.pack(side="left", fill="y", padx=10, pady=10)
+        self.sidebar.pack_propagate(False)
+
+        # Window Controls
+        self.ctrl = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.ctrl.pack(fill="x", pady=15, padx=10)
+        ctk.CTkButton(self.ctrl, text="✕", width=28, height=28, fg_color="#DA3633", hover_color="#B62324", corner_radius=14, command=self.exit_app).pack(side="right", padx=2)
+        ctk.CTkButton(self.ctrl, text="—", width=28, height=28, fg_color="#30363D", hover_color="#484F58", corner_radius=14, command=self.minimize_app).pack(side="right", padx=2)
+
+        self.logo = ctk.CTkLabel(self.sidebar, text="LATENCY\nASSASSIN", font=("Century Gothic", 20, "bold"), text_color="#00F2FF")
+        self.logo.pack(pady=20)
         
-        # 1. Header
-        self.lbl_title = ctk.CTkLabel(self, text="SYSTEM COMMANDER", font=("Impact", 28))
-        self.lbl_title.pack(pady=20)
+        self.uptime_lbl = ctk.CTkLabel(self.sidebar, text="UPTIME: 00:00", font=("Century Gothic", 12), text_color="gray")
+        self.uptime_lbl.pack(side="bottom", pady=30)
 
-        # 2. CPU / RAM Section
-        self.frame_stats = ctk.CTkFrame(self)
-        self.frame_stats.pack(pady=10, padx=20, fill="x")
+        # MAIN CONSOLE
+        self.main = ctk.CTkFrame(self.glass_panel, fg_color="transparent")
+        self.main.pack(side="right", fill="both", expand=True, padx=25, pady=25)
+
+        # 1. NETWORK RADAR (Latency + Jitter)
+        self.net_hud = ctk.CTkFrame(self.main, fg_color="transparent")
+        self.net_hud.pack(fill="x", pady=(0, 10))
+        self.ping_lbl = ctk.CTkLabel(self.net_hud, text="-- MS", font=("Century Gothic", 45, "bold"), text_color="#00F2FF")
+        self.ping_lbl.pack(side="left", expand=True)
+        self.jitter_lbl = ctk.CTkLabel(self.net_hud, text="JITTER: --", font=("Century Gothic", 12), text_color="#D29922")
+        self.jitter_lbl.pack(side="right", padx=10)
+
+        # 2. LIVE RESOURCE HUDS
+        self.cpu_bar = self.create_hud("CPU LOAD", "#00F2FF")
+        self.gpu_bar = self.create_hud("iGPU LOAD", "#A855F7")
+        self.ram_bar = self.create_hud("MEMORY", "#3FB950")
+
+        # 3. COMMANDS
+        self.p_var = ctk.StringVar(value="off")
+        ctk.CTkSwitch(self.main, text="PERFORMANCE PROTOCOL", font=("Century Gothic", 12), variable=self.p_var, command=self.toggle_power, progress_color="#00F2FF").pack(pady=10)
+        ctk.CTkButton(self.main, text="EXECUTE RAM PURGE", font=("Century Gothic", 14, "bold"), fg_color="#EF4444", height=45, corner_radius=22, command=self.run_purge).pack(fill="x", pady=10)
+
+        self.status = ctk.CTkLabel(self.main, text="SYSTEM NOMINAL", font=("Century Gothic", 10), text_color="gray")
+        self.status.pack(side="bottom")
+
+        # --- BINDINGS & THREADS ---
+        self.bind("<Enter>", lambda e: self.set_fade(0.95))
+        self.bind("<Leave>", lambda e: self.set_fade(0.2))
         
-        self.lbl_cpu = ctk.CTkLabel(self.frame_stats, text="CPU Usage: --%", font=("Arial", 14, "bold"))
-        self.lbl_cpu.pack(pady=5)
-        self.prog_cpu = ctk.CTkProgressBar(self.frame_stats, width=350)
-        self.prog_cpu.pack(pady=5)
+        threading.Thread(target=self.radar_thread, daemon=True).start()
+        self.update_ui(); self.fade_engine()
 
-        self.lbl_ram = ctk.CTkLabel(self.frame_stats, text="RAM Usage: --%", font=("Arial", 14, "bold"))
-        self.lbl_ram.pack(pady=5)
-        self.prog_ram = ctk.CTkProgressBar(self.frame_stats, width=350, progress_color="#1f6aa5")
-        self.prog_ram.pack(pady=5)
+    def create_hud(self, name, color):
+        ctk.CTkLabel(self.main, text=name, font=("Century Gothic", 10), text_color="gray").pack(anchor="w", padx=10)
+        bar = ctk.CTkProgressBar(self.main, height=10, corner_radius=10, progress_color=color, fg_color="#1F2937")
+        bar.pack(fill="x", padx=10, pady=(2, 10))
+        bar.set(0)
+        return bar
 
-        # 3. Network Radar (Ping)
-        self.frame_net = ctk.CTkFrame(self)
-        self.frame_net.pack(pady=10, padx=20, fill="x")
+    # Fade Logic
+    def set_fade(self, val): self.target_alpha = val
+    def fade_engine(self):
+        step = 0.04
+        if abs(self.current_alpha - self.target_alpha) > 0.01:
+            self.current_alpha += step if self.current_alpha < self.target_alpha else -step
+            self.attributes("-alpha", self.current_alpha)
+        self.after(50, self.fade_engine)
 
-        self.lbl_net_header = ctk.CTkLabel(self.frame_net, text="NETWORK LATENCY (Google DNS)", font=("Arial", 12))
-        self.lbl_net_header.pack(pady=5)
+    # Window Actions
+    def start_move(self, event): self.x = event.x; self.y = event.y
+    def do_move(self, event):
+        x, y = self.winfo_x() + (event.x - self.x), self.winfo_y() + (event.y - self.y)
+        self.geometry(f"+{x}+{y}")
 
-        self.lbl_ping = ctk.CTkLabel(self.frame_net, text="Ping: -- ms", font=("Arial", 30, "bold"))
-        self.lbl_ping.pack(pady=5)
-        
-        self.lbl_net_status = ctk.CTkLabel(self.frame_net, text="Initializing Radar...", font=("Arial", 12))
-        self.lbl_net_status.pack(pady=5)
+    def minimize_app(self): self.attributes("-alpha", 0); self.state('iconic')
+    def exit_app(self): self.running = False; self.destroy(); sys.exit()
 
-        # 4. Controls (Power & Purge)
-        self.frame_controls = ctk.CTkFrame(self)
-        self.frame_controls.pack(pady=20, padx=20, fill="x")
-
-        # Power Switch
-        self.switch_var = ctk.StringVar(value="off")
-        self.switch = ctk.CTkSwitch(
-            self.frame_controls, 
-            text="GAMING MODE (High Perf)", 
-            command=self.toggle_mode,
-            variable=self.switch_var, 
-            onvalue="on", 
-            offvalue="off",
-            font=("Arial", 14)
-        )
-        self.switch.pack(pady=15)
-
-        # Purge Button
-        self.btn_purge = ctk.CTkButton(
-            self.frame_controls, 
-            text="PURGE BLOATWARE (Kill Background Apps)", 
-            fg_color="#D43636", 
-            hover_color="#8B0000",
-            height=40,
-            font=("Arial", 12, "bold"),
-            command=self.run_purge
-        )
-        self.btn_purge.pack(pady=10, padx=20, fill="x")
-        
-        self.lbl_msg = ctk.CTkLabel(self.frame_controls, text="Ready.", text_color="gray")
-        self.lbl_msg.pack(pady=5)
-
-        # --- START ENGINES ---
-        # 1. Start the Background Ping Thread
-        self.thread = threading.Thread(target=self.ping_loop, daemon=True)
-        self.thread.start()
-
-        # 2. Start the UI Update Loop
-        self.update_ui_loop()
-
-    # --- BACKGROUND THREAD (Runs in parallel) ---
-    def ping_loop(self):
+    def radar_thread(self):
         while self.running:
-            # Check ping
-            ms = self.net_monitor.get_ping()
-            self.current_ping = ms
-            
-            # Determine Color based on Lag
-            if ms < 50:
-                self.ping_status_color = "#00FF00" # Green
-            elif ms < 100:
-                self.ping_status_color = "#FFAA00" # Yellow
-            else:
-                self.ping_status_color = "#FF0000" # Red
-            
-            # Sleep 1.5s so we don't spam the network
-            time.sleep(1.5)
+            self.ping, self.jitter = self.radar.get_stats(); time.sleep(1.5)
 
-    # --- MAIN UI LOOP (Runs on Main Thread) ---
-    def update_ui_loop(self):
-        # 1. Update CPU/RAM
-        cpu = self.monitor.get_cpu_usage()
-        ram = self.monitor.get_ram_usage()
+    def update_ui(self):
+        cpu, gpu, ram = self.monitor.get_cpu_usage(), self.monitor.get_gpu_usage(), self.monitor.get_ram_usage()
+        self.cpu_bar.set(cpu / 100); self.gpu_bar.set(gpu / 100); self.ram_bar.set(ram['percent'] / 100)
+        self.ping_lbl.configure(text=f"{self.ping} MS"); self.jitter_lbl.configure(text=f"JITTER: {self.jitter}ms")
+        self.uptime_lbl.configure(text=f"UPTIME: {self.monitor.get_uptime()}")
+        self.after(1000, self.update_ui)
 
-        self.lbl_cpu.configure(text=f"CPU: {cpu}%")
-        self.prog_cpu.set(cpu / 100)
-        self.prog_cpu.configure(progress_color="red" if cpu > 85 else "#1f6aa5")
-
-        self.lbl_ram.configure(text=f"RAM: {ram['percent']}% ({ram['used_gb']}GB Used)")
-        self.prog_ram.set(ram['percent'] / 100)
-        self.prog_ram.configure(progress_color="red" if ram['percent'] > 85 else "#1f6aa5")
-
-        # 2. Update Ping (Read from the shared variable)
-        self.lbl_ping.configure(text=f"Ping: {self.current_ping} ms", text_color=self.ping_status_color)
-        
-        if self.current_ping > 150:
-            self.lbl_net_status.configure(text="LAG SPIKE DETECTED!", text_color="red")
-        else:
-            self.lbl_net_status.configure(text="Network Stable", text_color="gray")
-
-        # Schedule next update in 500ms
-        self.after(500, self.update_ui_loop)
-
-    # --- BUTTON COMMANDS ---
-    def toggle_mode(self):
-        if self.switch_var.get() == "on":
-            msg = self.power.set_high_performance()
-            self.lbl_msg.configure(text=msg, text_color="#FF5555")
-        else:
-            msg = self.power.set_balanced()
-            self.lbl_msg.configure(text=msg, text_color="white")
+    def toggle_power(self):
+        self.status.configure(text=self.power.set_high_performance() if self.p_var.get() == "on" else self.power.set_balanced())
 
     def run_purge(self):
-        self.lbl_msg.configure(text="Cleaning...", text_color="yellow")
-        self.update()
-        count, mb = self.optimizer.purge_bloatware()
-        self.lbl_msg.configure(text=f"Killed {count} apps. Freed {mb} MB!", text_color="#00FF00")
-
-    def on_closing(self):
-        self.running = False
-        self.destroy()
+        k, m = self.opt.purge()
+        self.status.configure(text=f"PURGED {k} APPS | {m}MB FREED", text_color="#10B981")
 
 if __name__ == "__main__":
-    app = DashboardApp()
-    app.protocol("WM_DELETE_WINDOW", app.on_closing)
-    app.mainloop()
+    app = LatencyAssassin(); app.mainloop()
